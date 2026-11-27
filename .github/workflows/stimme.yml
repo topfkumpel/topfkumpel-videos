@@ -1,0 +1,46 @@
+# Erzeugt Sprachdateien mit ElevenLabs, sobald ein Auftrag in stimme/auftraege/ liegt.
+# Der Schlüssel liegt nur als GitHub-Secret ELEVENLABS_API_KEY (nie im Repo, nie im Chat).
+name: Stimme (ElevenLabs)
+on:
+  push:
+    branches: [main]
+    paths: ['stimme/auftraege/*.json']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: stimme
+  cancel-in-progress: false
+jobs:
+  tts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sprachdateien erzeugen
+        env:
+          XI_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p stimme/fertig
+          shopt -s nullglob
+          for f in stimme/auftraege/*.json; do
+            name=$(basename "$f" .json)
+            out="stimme/fertig/$name.mp3"
+            [ -f "$out" ] && continue
+            voice=$(jq -r '.voice_id' "$f")
+            body=$(jq -c '{text: .text, model_id: (.model_id // "eleven_v3"),
+                          voice_settings: {stability: (.stability // 0.5), similarity_boost: (.similarity // 0.75)}}' "$f")
+            code=$(curl -sS -o "$out.tmp" -w '%{http_code}' -X POST \
+              "https://api.elevenlabs.io/v1/text-to-speech/$voice?output_format=mp3_44100_128" \
+              -H "xi-api-key: $XI_KEY" -H 'Content-Type: application/json' -d "$body")
+            if [ "$code" = "200" ]; then mv "$out.tmp" "$out"
+            else { cat "$out.tmp"; echo; echo "HTTP $code"; } > "stimme/fertig/$name.fehler.txt"; rm -f "$out.tmp"; fi
+          done
+      - name: Ergebnis ins Repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stimme/fertig
+          git diff --cached --quiet || git commit -m "Stimme erzeugt [skip ci]"
+          git push
